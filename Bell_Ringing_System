@@ -1,1 +1,251 @@
 
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <ArduinoJson.h>
+
+// ---------------- Wi-Fi ----------------
+const char* ssid = "Babu";       // Replace with your Wi-Fi SSID
+const char* password = "1234567890";   // Replace with your Wi-Fi password
+
+ESP8266WebServer server(80);
+
+// ---------------- NTP Time ----------------
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 3*3600, 60000); // GMT+3 for Kenya
+
+// ---------------- Pins ----------------
+#define BUZZER_PIN D8 // GPIO14
+
+// ---------------- Schedule ----------------
+struct Lesson {
+  String name;
+  int startHour;
+  int startMinute;
+  int endHour;
+  int endMinute;
+};
+
+#define MAX_LESSONS 20
+Lesson schedule[MAX_LESSONS];
+int lessonCount = 0;
+
+// ---------------- Setup ----------------
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
+
+  timeClient.begin();
+
+  // Predefined schedule
+  addLesson("Lesson 1", 8, 0, 8, 45);
+  addLesson("Lesson 2", 8, 50, 9, 35);
+  addLesson("Tea Break", 9, 35, 9, 50);
+  addLesson("Lesson 3", 9, 50, 10, 35);
+  addLesson("Lesson 4", 10, 40, 11, 25);
+  addLesson("Lunch Break", 11, 25, 12, 10);
+  addLesson("Lesson 5", 12, 10, 12, 55);
+  addLesson("Lesson 6", 13, 0, 13, 45);
+
+  // Web server routes
+  server.on("/", handleRoot);
+  server.on("/manual_ring", handleManualRing);
+  server.on("/get_schedule", handleGetSchedule);
+  server.on("/add_lesson", handleAddLesson);
+  server.on("/delete_lesson", handleDeleteLesson);
+  server.on("/update_lesson", handleUpdateLesson);
+
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+// ---------------- Loop ----------------
+void loop() {
+  timeClient.update();
+  checkBell();
+  server.handleClient();
+}
+
+// ---------------- Schedule Functions ----------------
+void addLesson(String name, int sh, int sm, int eh, int em) {
+  if (lessonCount < MAX_LESSONS) {
+    schedule[lessonCount].name = name;
+    schedule[lessonCount].startHour = sh;
+    schedule[lessonCount].startMinute = sm;
+    schedule[lessonCount].endHour = eh;
+    schedule[lessonCount].endMinute = em;
+    lessonCount++;
+  }
+}
+
+void deleteLesson(int index) {
+  if(index < 0 || index >= lessonCount) return;
+  for(int i = index; i < lessonCount-1; i++){
+    schedule[i] = schedule[i+1];
+  }
+  lessonCount--;
+}
+
+void checkBell() {
+  int h = timeClient.getHours();
+  int m = timeClient.getMinutes();
+  int s = timeClient.getSeconds();
+
+  for (int i = 0; i < lessonCount; i++) {
+    if (h == schedule[i].startHour && m == schedule[i].startMinute && s == 0) ringBuzzer();
+    if (h == schedule[i].endHour && m == schedule[i].endMinute && s == 0) ringBuzzer();
+  }
+}
+
+void ringBuzzer() {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(2000);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+// ---------------- Web Handlers ----------------
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head><title>ESP-12E Bell System</title>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<style>"
+          "body{font-family:Arial;margin:0;padding:0;background:#f0f2f5;color:#333;}"
+          "header{background:#4caf50;color:white;padding:20px;text-align:center;}"
+          "h1{margin:0;}"
+          "table{width:90%;margin:20px auto;border-collapse:collapse;}"
+          "th,td{padding:12px;border:1px solid #ccc;text-align:center;}"
+          "th{background:#4caf50;color:white;}"
+          ".btn{padding:6px 12px;margin:2px;cursor:pointer;border:none;border-radius:5px;color:white;}"
+          ".manual{background:#ff5722;}"
+          ".add{background:#2196f3;}"
+          ".edit{background:#ffc107;}"
+          ".delete{background:#f44336;}"
+          ".lesson{background:#d4edda;}"      // light green
+          ".tea{background:#fff3cd;}"         // light yellow
+          ".lunch{background:#ffe5b4;}"       // light orange
+          "</style></head><body>";
+  html += "<header><h1>ESP-12E School Bell System</h1></header>";
+  html += "<div style='text-align:center;font-size:24px;margin-top:10px;'>Current Time: <b id='currentTime'>--:--:--</b></div>";
+
+  // Table
+  html += "<table><tr><th>Lesson / Break</th><th>Start</th><th>End</th><th>Actions</th></tr>";
+  html += "<tbody id='scheduleBody'></tbody></table>";
+
+  html += "<div style='text-align:center;margin-bottom:20px;'>"
+          "<button class='btn manual' onclick='manualRing()'>Ring Buzzer Now</button>"
+          "</div>";
+
+  // Add lesson form
+  html += "<div style='text-align:center;margin-bottom:30px;'>"
+          "Name: <input type='text' id='lessonName'> "
+          "Start(HH:MM): <input type='time' id='startTime'> "
+          "End(HH:MM): <input type='time' id='endTime'> "
+          "<button class='btn add' onclick='addLesson()'>Add Lesson</button>"
+          "</div>";
+
+  // JavaScript for AJAX
+  html += "<script>"
+          "function fetchSchedule(){"
+          "fetch('/get_schedule').then(r=>r.json()).then(data=>{"
+          "let body='';"
+          "data.forEach((lesson,i)=>{"
+          "let cls='lesson';"
+          "if(lesson.name.toLowerCase().includes('tea')) cls='tea';"
+          "if(lesson.name.toLowerCase().includes('lunch')) cls='lunch';"
+          "body+='<tr class=\"'+cls+'\"><td>'+lesson.name+'</td><td>'+lesson.start+'</td><td>'+lesson.end+'</td>' +"
+          "'<td><button class=\\'btn edit\\' onclick=\\'editLesson('+i+')\\'>Edit Lesson</button>' +"
+          "'<button class=\\'btn delete\\' onclick=\\'deleteLesson('+i+')\\'>Delete lesson</button></td></tr>';});"
+          "document.getElementById('scheduleBody').innerHTML=body;"
+          "});"
+          "}"
+          "function manualRing(){ fetch('/manual_ring'); }"
+          "function addLesson(){"
+          "let name=document.getElementById('lessonName').value;"
+          "let start=document.getElementById('startTime').value;"
+          "let end=document.getElementById('endTime').value;"
+          "fetch('/add_lesson?name='+encodeURIComponent(name)+'&start='+start+'&end='+end).then(()=>{ fetchSchedule(); });"
+          "}"
+          "function deleteLesson(i){ fetch('/delete_lesson?index='+i).then(()=>fetchSchedule()); }"
+          "function editLesson(i){"
+          "let newName=prompt('Lesson Name?');"
+          "let newStart=prompt('Start HH:MM?');"
+          "let newEnd=prompt('End HH:MM?');"
+          "fetch('/update_lesson?index='+i+'&name='+encodeURIComponent(newName)+'&start='+newStart+'&end='+newEnd).then(()=>fetchSchedule());"
+          "}"
+          "function updateTime(){"
+          "let now=new Date();"
+          "document.getElementById('currentTime').innerText=now.toLocaleTimeString();"
+          "}"
+          "setInterval(fetchSchedule,2000);"
+          "setInterval(updateTime,1000);"
+          "fetchSchedule();"
+          "</script>";
+
+  html += "</body></html>";
+  server.send(200,"text/html",html);
+}
+
+// ---------------- AJAX Endpoints ----------------
+void handleGetSchedule() {
+  DynamicJsonDocument doc(1024);
+  for(int i=0;i<lessonCount;i++){
+    JsonObject obj = doc.createNestedObject();
+    obj["name"] = schedule[i].name;
+    obj["start"] = formatTime(schedule[i].startHour,schedule[i].startMinute);
+    obj["end"] = formatTime(schedule[i].endHour,schedule[i].endMinute);
+  }
+  String output;
+  serializeJson(doc,output);
+  server.send(200,"application/json",output);
+}
+
+void handleManualRing() { ringBuzzer(); server.send(200,"text/plain","OK"); }
+
+void handleAddLesson() {
+  if(lessonCount>=MAX_LESSONS){ server.send(400,"text/plain","Max lessons reached"); return; }
+  String name = server.arg("name");
+  String start = server.arg("start");
+  String end = server.arg("end");
+  int sh = start.substring(0,2).toInt();
+  int sm = start.substring(3,5).toInt();
+  int eh = end.substring(0,2).toInt();
+  int em = end.substring(3,5).toInt();
+  addLesson(name,sh,sm,eh,em);
+  server.send(200,"text/plain","OK");
+}
+
+void handleDeleteLesson() {
+  int index = server.arg("index").toInt();
+  deleteLesson(index);
+  server.send(200,"text/plain","OK");
+}
+
+void handleUpdateLesson() {
+  int index = server.arg("index").toInt();
+  String name = server.arg("name");
+  String start = server.arg("start");
+  String end = server.arg("end");
+  if(index<0 || index>=lessonCount){ server.send(400,"text/plain","Invalid index"); return; }
+  schedule[index].name = name;
+  schedule[index].startHour = start.substring(0,2).toInt();
+  schedule[index].startMinute = start.substring(3,5).toInt();
+  schedule[index].endHour = end.substring(0,2).toInt();
+  schedule[index].endMinute = end.substring(3,5).toInt();
+  server.send(200,"text/plain","OK");
+}
+
+// ---------------- Utility ----------------
+String formatTime(int h,int m){
+  char buf[6];
+  sprintf(buf,"%02d:%02d",h,m);
+  return String(buf);
+}
