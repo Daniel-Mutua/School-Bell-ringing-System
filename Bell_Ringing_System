@@ -6,8 +6,8 @@
 #include <ArduinoJson.h>
 
 // ---------------- Wi-Fi ----------------
-const char* ssid = "Babu";       // Replace with your Wi-Fi SSID
-const char* password = "1234567890";   // Replace with your Wi-Fi password
+const char* ssid = "Your WIFI Name";       // Replace with your Wi-Fi SSID
+const char* password = "Your WIFI Password";   // Replace with your Wi-Fi password
 
 ESP8266WebServer server(80);
 
